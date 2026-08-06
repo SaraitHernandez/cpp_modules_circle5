@@ -25,13 +25,12 @@ int main(int argc, char **argv)
 	try
 	{
 		btc.loadDatabase("data.csv");
+		btc.processInput(argv[1]);
 	}
 	catch (std::exception &e)
 	{
 		std::cerr << "Error: " << e.what() << std::endl;
 		return 1;
 	}
-
-	btc.processInput(argv[1]);
 	return 0;
 }

@@ -32,7 +32,7 @@ BitcoinExchange::~BitcoinExchange() {}
 
 const char *BitcoinExchange::DatabaseError::what() const throw()
 {
-	return "could not open database file.";
+	return "could not open file.";
 }
 
 // Trim surrounding whitespace of a string.
@@ -166,10 +166,7 @@ void BitcoinExchange::processInput(const std::string &filename)
 {
 	std::ifstream file(filename.c_str());
 	if (!file.is_open())
-	{
-		std::cerr << "Error: could not open file." << std::endl;
-		return;
-	}
+		throw DatabaseError();
 
 	std::string line;
 	std::getline(file, line); // header "date | value"
