@@ -14,7 +14,9 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <algorithm>
 #include <cstdlib>
+#include <cctype>
 #include <climits>
 #include <sys/time.h>
 
@@ -33,10 +35,6 @@ PmergeMe &PmergeMe::operator=(const PmergeMe &other)
 }
 
 PmergeMe::~PmergeMe() {}
-
-// --------------------------------------------------------------------------
-// Parsing
-// --------------------------------------------------------------------------
 
 static bool parseInt(const std::string &tok, int &out)
 {
@@ -74,17 +72,16 @@ void PmergeMe::parse(int argc, char **argv)
 		throw std::runtime_error("Error");
 }
 
-// --------------------------------------------------------------------------
-// Ford-Johnson merge-insert sort (templated, instantiated per container)
-// --------------------------------------------------------------------------
+// The sort runs on indices, so a pair stays linked even when values repeat.
+template <typename C> struct IndexContainer;
+template <> struct IndexContainer<std::vector<int> > { typedef std::vector<size_t> type; };
+template <> struct IndexContainer<std::deque<int> >  { typedef std::deque<size_t> type; };
 
 // Jacobsthal numbers: 0, 1, 1, 3, 5, 11, 21, 43, 85, ...
 static size_t jacobsthal(size_t n)
 {
-	if (n == 0)
-		return 0;
-	if (n == 1)
-		return 1;
+	if (n < 2)
+		return n;
 	size_t a = 0, b = 1;
 	for (size_t i = 2; i <= n; ++i)
 	{
@@ -95,55 +92,78 @@ static size_t jacobsthal(size_t n)
 	return b;
 }
 
-// Builds the order in which the "pend" (smaller) elements are inserted,
-// following the Jacobsthal sequence, then appending any remaining index.
-static std::vector<size_t> buildInsertionOrder(size_t m)
+// Binary insertion of 'element' into the sorted range chain[0, last).
+template <typename IC, typename C>
+static void binaryInsert(IC &chain, const C &values, size_t element, size_t last)
 {
-	std::vector<size_t> order;
-	std::vector<bool> used(m, false);
-
-	size_t k = 2;
-	size_t prev = jacobsthal(1); // 1
-	while (prev < m)
+	size_t first = 0;
+	while (first < last)
 	{
-		size_t cur = jacobsthal(k);
-		if (cur > m)
-			cur = m;
-		for (size_t idx = cur; idx > prev; --idx)
-		{
-			size_t zero = idx - 1;
-			if (zero < m && !used[zero])
-			{
-				order.push_back(zero);
-				used[zero] = true;
-			}
-		}
-		if (cur == m)
-			break;
-		prev = jacobsthal(k);
-		++k;
+		size_t mid = first + (last - first) / 2;
+		if (values[chain[mid]] < values[element])
+			first = mid + 1;
+		else
+			last = mid;
 	}
-	// Safety net: append any index not yet covered, in ascending order.
-	for (size_t i = 0; i < m; ++i)
-		if (!used[i])
-			order.push_back(i);
-	return order;
+	chain.insert(chain.begin() + first, element);
 }
 
-// Binary insertion of 'val' into the sorted range chain[0..hi).
-template <typename C>
-static void binaryInsert(C &chain, int val, size_t hi)
+template <typename IC, typename C>
+static void fordJohnson(IC &idx, const C &values)
 {
-	size_t lo = 0;
-	while (lo < hi)
+	size_t n = idx.size();
+	if (n < 2)
+		return;
+
+	bool odd = (n % 2 == 1);
+	size_t leftover = 0;
+	if (odd)
+		leftover = idx[n - 1];
+
+	IC mains;
+	IC partnerOf(values.size(), 0);
+	for (size_t i = 0; i + 1 < n; i += 2)
 	{
-		size_t mid = lo + (hi - lo) / 2;
-		if (chain[mid] < val)
-			lo = mid + 1;
-		else
-			hi = mid;
+		size_t small = idx[i];
+		size_t big = idx[i + 1];
+		if (values[big] < values[small])
+			std::swap(small, big);
+		mains.push_back(big);
+		partnerOf[big] = small;
 	}
-	chain.insert(chain.begin() + lo, val);
+
+	fordJohnson(mains, values);
+
+	size_t m = mains.size();
+	IC chain;
+	chain.push_back(partnerOf[mains[0]]);
+	for (size_t k = 0; k < m; ++k)
+		chain.push_back(mains[k]);
+
+	size_t pend = odd ? m + 1 : m; // the odd element is one more pend element
+	size_t prevEnd = 1;            // b1 is already in place
+	size_t r = 3;                  // J(3) = 3 closes the first group after b1
+
+	while (prevEnd < pend)
+	{
+		size_t currEnd = jacobsthal(r);
+		if (currEnd > pend)
+			currEnd = pend;
+		size_t reach = currEnd + prevEnd - 1;
+		if (reach > chain.size())
+			reach = chain.size();
+
+		for (size_t position = currEnd; position > prevEnd; --position)
+		{
+			size_t k = position - 1; // positions start at 1, indices at 0
+			size_t element = (k < m) ? partnerOf[mains[k]] : leftover;
+			binaryInsert(chain, values, element, reach);
+		}
+		prevEnd = currEnd;
+		++r;
+	}
+
+	idx = chain;
 }
 
 template <typename C>
@@ -153,69 +173,17 @@ static void mergeInsertSort(C &a)
 	if (n < 2)
 		return;
 
-	// 1. Split into pairs (larger, smaller). Keep track of an odd straggler.
-	bool odd = (n % 2 == 1);
-	int straggler = 0;
-	if (odd)
-		straggler = a[n - 1];
+	typename IndexContainer<C>::type idx;
+	for (size_t i = 0; i < n; ++i)
+		idx.push_back(i);
 
-	C larger;
-	C smaller;
-	for (size_t i = 0; i + 1 < n; i += 2)
-	{
-		if (a[i] < a[i + 1])
-		{
-			larger.push_back(a[i + 1]);
-			smaller.push_back(a[i]);
-		}
-		else
-		{
-			larger.push_back(a[i]);
-			smaller.push_back(a[i + 1]);
-		}
-	}
+	fordJohnson(idx, a);
 
-	// 2. Recursively sort the larger elements: this is the main chain seed.
-	mergeInsertSort(larger);
-
-	// 3. The sorted larger elements form the initial main chain.
-	C chain = larger;
-
-	// 4. Insert the smaller elements using binary insertion, following the
-	//    Jacobsthal order. The very first smaller can go straight to the front.
-	if (!smaller.empty())
-	{
-		binaryInsert(chain, smaller[0], chain.size());
-		std::vector<size_t> order = buildInsertionOrder(smaller.size());
-		for (size_t i = 0; i < order.size(); ++i)
-		{
-			size_t idx = order[i];
-			if (idx == 0)
-				continue; // already inserted
-			binaryInsert(chain, smaller[idx], chain.size());
-		}
-	}
-
-	// 5. Insert the straggler, if any.
-	if (odd)
-		binaryInsert(chain, straggler, chain.size());
-
-	a = chain;
+	C sorted;
+	for (size_t i = 0; i < n; ++i)
+		sorted.push_back(a[idx[i]]);
+	a = sorted;
 }
-
-void PmergeMe::_sortVector()
-{
-	mergeInsertSort(_vec);
-}
-
-void PmergeMe::_sortDeque()
-{
-	mergeInsertSort(_deq);
-}
-
-// --------------------------------------------------------------------------
-// Output / driver
-// --------------------------------------------------------------------------
 
 template <typename C>
 static void printSequence(const std::string &label, const C &c)
@@ -238,11 +206,11 @@ void PmergeMe::run()
 	printSequence("Before:", _vec);
 
 	double startV = nowMicroseconds();
-	_sortVector();
+	mergeInsertSort(_vec);
 	double endV = nowMicroseconds();
 
 	double startD = nowMicroseconds();
-	_sortDeque();
+	mergeInsertSort(_deq);
 	double endD = nowMicroseconds();
 
 	printSequence("After: ", _vec);
