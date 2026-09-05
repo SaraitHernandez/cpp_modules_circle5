@@ -1,0 +1,30 @@
+[mysqld]
+user                 = mysql
+datadir              = /var/lib/mysql
+socket               = /run/mysqld/mysqld.sock
+pid-file             = /run/mysqld/mysqld.pid
+
+# Listen on every interface of the container so WordPress can reach us over the
+# `inception` docker network. The port is never published to the host.
+skip-networking      = 0
+bind-address         = 0.0.0.0
+port                 = 3306
+
+# Containers get names, not DNS-resolvable reverse records: resolving them would
+# only add latency and flaky auth.
+skip-name-resolve
+skip-host-cache
+
+character-set-server = utf8mb4
+collation-server     = utf8mb4_unicode_ci
+
+max_connections      = 100
+
+# No `log_error` here on purpose: the server is started with --console, which
+# already sends the error log to stderr, so `docker logs mariadb` works.
+# Pointing log_error at /dev/stderr would make MariaDB try to open
+# "/dev/stderr.err" and fail.
+
+[client]
+socket               = /run/mysqld/mysqld.sock
+default-character-set = utf8mb4

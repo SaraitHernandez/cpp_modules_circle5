@@ -1,0 +1,156 @@
+# =============================================================================
+#  Inception — service orchestration
+#  Invoked exclusively through the Makefile at the root of the repository.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  #  MariaDB — the only container that talks to the database volume.
+  #  Never exposed to the host: reachable only from the `inception` network.
+  # ---------------------------------------------------------------------------
+  mariadb:
+    build:
+      context: ./requirements/mariadb
+      args:
+        ALPINE_VERSION: ${ALPINE_VERSION}
+    image: mariadb:inception
+    container_name: mariadb
+    restart: always
+    networks:
+      - inception
+    expose:
+      - "3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+    secrets:
+      - db_password
+      - db_root_password
+    healthcheck:
+      # Lets WordPress wait for a *ready* database instead of looping/sleeping.
+      test: ["CMD", "healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  #  WordPress + php-fpm — no web server inside, it only speaks FastCGI.
+  # ---------------------------------------------------------------------------
+  wordpress:
+    build:
+      context: ./requirements/wordpress
+      args:
+        ALPINE_VERSION: ${ALPINE_VERSION}
+    image: wordpress:inception
+    container_name: wordpress
+    restart: always
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - inception
+    expose:
+      - "9000"
+    volumes:
+      - wordpress_data:/var/www/html
+    environment:
+      DOMAIN_NAME: ${DOMAIN_NAME}
+      WP_URL: ${WP_URL}
+      WP_TITLE: ${WP_TITLE}
+      WP_ADMIN_USER: ${WP_ADMIN_USER}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL}
+      WP_USER: ${WP_USER}
+      WP_USER_EMAIL: ${WP_USER_EMAIL}
+      WP_USER_ROLE: ${WP_USER_ROLE}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_HOST: mariadb:3306
+    secrets:
+      - db_password
+      - wp_admin_password
+      - wp_user_password
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  #  NGINX — the single entrypoint of the whole infrastructure, TLS only.
+  # ---------------------------------------------------------------------------
+  nginx:
+    build:
+      context: ./requirements/nginx
+      args:
+        ALPINE_VERSION: ${ALPINE_VERSION}
+    image: nginx:inception
+    container_name: nginx
+    restart: always
+    depends_on:
+      wordpress:
+        condition: service_started
+    networks:
+      - inception
+    ports:
+      - "443:443"
+    volumes:
+      - wordpress_data:/var/www/html:ro
+    environment:
+      DOMAIN_NAME: ${DOMAIN_NAME}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+# =============================================================================
+#  Named volumes — bound to ${DATA_PATH} on the host, as required by the subject.
+#  They are *named volumes* (declared here, managed by Docker), not bind mounts
+#  declared in a service; the `local` driver is told which host directory to
+#  back them with.
+# =============================================================================
+volumes:
+  mariadb_data:
+    name: mariadb_data
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH}/mariadb
+
+  wordpress_data:
+    name: wordpress_data
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH}/wordpress
+
+# =============================================================================
+#  Private bridge network. `network: host`, `--link` and `links:` are forbidden.
+# =============================================================================
+networks:
+  inception:
+    name: inception
+    driver: bridge
+
+# =============================================================================
+#  Secrets — plain files on the host, mounted read-only at /run/secrets/<name>
+#  inside the containers. They never appear in the images, in the Dockerfiles,
+#  in `docker inspect`, nor in git.
+# =============================================================================
+secrets:
+  db_password:
+    file: ../secrets/db_password.txt
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  wp_admin_password:
+    file: ../secrets/wp_admin_password.txt
+  wp_user_password:
+    file: ../secrets/wp_user_password.txt

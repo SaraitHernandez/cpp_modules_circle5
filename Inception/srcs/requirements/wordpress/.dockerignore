@@ -1,0 +1,6 @@
+# Nothing outside conf/ and tools/ belongs in the build context.
+*
+!conf/
+!conf/**
+!tools/
+!tools/**
