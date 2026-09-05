@@ -58,13 +58,22 @@ Si VirtualBox no está instalado en la máquina de 42 y no tienes `sudo` en el
 host, usa GNOME Boxes o `virt-manager` (QEMU/KVM) — el resto de la guía es
 idéntico.
 
+> **Sobre la red.** NAT basta para todo lo que necesitas: la VM sale a internet
+> para descargar paquetes, y la defensa se hace con el navegador *dentro* de la
+> VM. Lo que NAT **no** te da es alcanzar la VM *desde* el host — así que `ssh`
+> y `scp` desde el Mac no funcionarán tal cual. Si los quieres, cambia la red a
+> *Adaptador puente* o añade una redirección de puertos (host 2222 → invitado
+> 22) en la configuración de red de la VM.
+
 ### 1.3 Instalar Debian
 
 Arranca desde la ISO y elige *Graphical install*. Puntos donde no improvisar:
 
 - **Hostname**: `inception` (o lo que quieras).
-- **Contraseña de root**: déjala **vacía**. Debian entonces añade tu usuario a
-  `sudo` automáticamente, que es lo que quieres.
+- **Contraseña de root**: déjala **vacía**. Debian entonces instala `sudo` y
+  mete a tu usuario en el grupo `sudo` automáticamente, que es lo que quieres.
+  Consecuencia a tener presente: la cuenta de root queda bloqueada y `su -`
+  **no** funcionará. Todo se hace con `sudo`.
 - **Usuario**: crea uno con tu login de 42 → `sarherna`. Esto importa: el
   subject exige que los volúmenes vivan en `/home/<login>/data`, y así ese
   directorio es tuyo sin pelearte con permisos.
@@ -78,15 +87,25 @@ Reinicia y entra con tu usuario.
 
 ### 1.4 Ajustes posteriores
 
+Si dejaste root sin contraseña —lo recomendado— ya tienes `sudo` y basta con:
+
 ```bash
-su -                          # si dejaste root sin contraseña, usa: sudo -i
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git make curl vim firefox-esr
+```
+
+Si en cambio **sí** pusiste contraseña de root, Debian no te habrá metido en el
+grupo `sudo`. Entra como root y arréglalo una vez:
+
+```bash
+su -
 apt update && apt upgrade -y
 apt install -y sudo git make curl vim firefox-esr
-usermod -aG sudo sarherna     # sólo si tu usuario aún no está en sudo
+usermod -aG sudo sarherna
 exit
 ```
 
-Cierra sesión y vuelve a entrar para que el grupo `sudo` tome efecto.
+y después cierra sesión y vuelve a entrar para que el grupo tome efecto.
 
 Opcional pero cómodo: instala las *Guest Additions* para tener pantalla completa
 y portapapeles compartido.
@@ -136,16 +155,21 @@ docker run --rm hello-world
 ## 3. Llevar el código a la VM
 
 El proyecto se entrega en su **propio repositorio de 42**, con el `README.md` en
-la raíz. Ahora mismo esta carpeta vive dentro de `cpp_modules`, así que hay que
-sacarla.
+la raíz. Ahora mismo esta carpeta está versionada **dentro** del repositorio
+`cpp_modules`, así que hay que sacarla — y no vale hacer `git init` aquí mismo:
+crearía un repositorio anidado dentro de otro y `cpp_modules` empezaría a
+quejarse de un *embedded git repository*.
 
-**Desde el Mac**, publica el contenido de esta carpeta en el repo de Inception
-que te dé la intra:
+**Desde el Mac**, saca una copia limpia y publícala en el repo de Inception que
+te dé la intra:
 
 ```bash
-cd ~/42/cpp_modules/Inception
-git init
+cp -R ~/42/cpp_modules/Inception ~/inception-entrega
+cd ~/inception-entrega
+rm -rf .git                  # por si acaso: la copia no debe traer historial
+git init -b main
 git add .
+git status --short           # ni secrets/ ni srcs/.env deben aparecer
 git commit -m "Inception: nginx + wordpress/php-fpm + mariadb"
 git remote add origin <URL_del_repo_de_Inception_en_la_intra>
 git push -u origin main
@@ -169,8 +193,12 @@ git clone <URL_del_repo> ~/inception
 cd ~/inception
 ```
 
-Si el repo de la intra te da problemas, `scp` desde el Mac también sirve para
-probar (`scp -r Inception/ usuario@ip_vm:~/inception`), pero la entrega final
+Si el repo de la intra te da problemas, puedes pasar los archivos a mano para ir
+probando — pero recuerda que **con la red en NAT la VM no es alcanzable desde el
+host**, así que `scp` no funciona tal cual. Tres salidas: cambiar la red a
+*Adaptador puente*, añadir la redirección de puertos host 2222 → invitado 22 y
+usar `scp -P 2222 -r ~/inception-entrega/ sarherna@127.0.0.1:~/inception`, o
+montar una carpeta compartida de VirtualBox. En cualquier caso, la entrega final
 tiene que estar en el repositorio de 42.
 
 ---
@@ -232,19 +260,25 @@ requisito literal del enunciado.
 make ps
 
 # --- las imágenes son tuyas y ninguna usa el tag "latest" ------------------
-docker image ls
-grep -rn '^FROM' srcs/requirements/*/Dockerfile     # alpine:3.23, nunca :latest
+docker image ls          # mariadb:inception, nginx:inception, wordpress:inception
+                         # y alpine:3.23, que es la única base permitida
+# El FROM usa una variable, así que enseña también de dónde sale su valor:
+grep -rn '^FROM\|^ARG ALPINE_VERSION' srcs/requirements/*/Dockerfile
+grep '^ALPINE_VERSION' srcs/.env    # 3.23 = penúltima estable (la actual es 3.24)
 
 # --- NGINX es la única entrada, y sólo por 443 ----------------------------
 docker ps --format '{{.Names}}: {{.Ports}}'         # sólo nginx publica 443
 curl -I http://sarherna.42.fr                       # tiene que fallar
 
 # --- sólo TLSv1.2 y TLSv1.3 ----------------------------------------------
-for v in -tls1 -tls1_1 -tls1_2 -tls1_3; do
+# Se lanza DESDE DENTRO del contenedor nginx a propósito: así el "rechazado" es
+# del servidor y no de la política TLS del openssl del sistema, que en algunas
+# distribuciones desactiva 1.0/1.1 en el propio cliente y falsearía la prueba.
+docker exec nginx sh -c 'for v in -tls1 -tls1_1 -tls1_2 -tls1_3; do
   printf "%-8s " "$v"
-  echo Q | openssl s_client -connect sarherna.42.fr:443 $v 2>&1 \
+  echo Q | openssl s_client -connect 127.0.0.1:443 $v 2>&1 \
     | grep -qE "New, TLSv1\.[23]" && echo ACEPTADO || echo rechazado
-done
+done'
 # esperado: -tls1 rechazado, -tls1_1 rechazado, -tls1_2 y -tls1_3 aceptados
 
 # --- volúmenes con nombre, apuntando a /home/<login>/data -----------------
@@ -307,6 +341,11 @@ pregunta de defensa habitual y saber esto suma.
 2. **Prueba `make re` completo** al menos una vez: `fclean` borra los volúmenes
    y los datos, y la reconstrucción desde cero es exactamente lo que hará el
    evaluador. Si eso funciona, todo funciona.
+
+   > Te pedirá la contraseña de `sudo`, y es normal: MariaDB deja sus archivos
+   > con dueño `mysql` (uid 100 dentro del contenedor), así que tu usuario no
+   > puede borrarlos y el Makefile recurre a `sudo rm -rf`. Que no te pille por
+   > sorpresa delante del evaluador.
 3. **Confirma que el repo está limpio**: `git status` sin cambios sin subir, y
    `git ls-files` sin `secrets/` ni `.env`.
 4. **Repasa el porqué de cada decisión.** Las preguntas que siempre caen:
